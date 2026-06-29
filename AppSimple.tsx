@@ -8,13 +8,6 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import {
-  Battery,
-  BatteryCharging,
-  Cpu,
-  RefreshCw,
-  Smartphone,
-} from 'lucide-react-native';
 import NativeDeviceInfo from './specs/NativeAppDeviceInfo';
 
 const COLORS = {
@@ -36,7 +29,7 @@ type DeviceData = {
 };
 
 type CardProps = {
-  icon: React.ReactNode;
+  emoji: string;
   label: string;
   badge: string;
   value: string | null;
@@ -44,11 +37,11 @@ type CardProps = {
   accent: string;
 };
 
-function InfoCard({ icon, label, badge, value, loading, accent }: CardProps) {
+function InfoCard({ emoji, label, badge, value, loading, accent }: CardProps) {
   return (
     <View style={[styles.card, { borderLeftColor: accent }]}>
       <View style={[styles.iconWrap, { backgroundColor: accent + '22' }]}>
-        {icon}
+        <Text style={styles.emoji}>{emoji}</Text>
       </View>
       <View style={styles.cardBody}>
         <View style={styles.cardTop}>
@@ -125,7 +118,7 @@ export default function App(): React.JSX.Element {
 
         <Text style={styles.sectionTitle}>ASYNC</Text>
         <InfoCard
-          icon={<Battery size={22} color={COLORS.success} />}
+          emoji="🔋"
           label="Battery Level"
           badge="Promise<number>"
           value={data.batteryLevel}
@@ -133,7 +126,7 @@ export default function App(): React.JSX.Element {
           accent={COLORS.success}
         />
         <InfoCard
-          icon={<BatteryCharging size={22} color={COLORS.warning} />}
+          emoji="⚡"
           label="Battery State"
           badge="Promise<string>"
           value={data.batteryState}
@@ -143,7 +136,7 @@ export default function App(): React.JSX.Element {
 
         <Text style={[styles.sectionTitle, { marginTop: 28 }]}>SYNC</Text>
         <InfoCard
-          icon={<Cpu size={22} color={COLORS.accent} />}
+          emoji="💻"
           label="System Version"
           badge="string"
           value={data.systemVersion}
@@ -151,7 +144,7 @@ export default function App(): React.JSX.Element {
           accent={COLORS.accent}
         />
         <InfoCard
-          icon={<Smartphone size={22} color={COLORS.purple} />}
+          emoji="📱"
           label="System Name"
           badge="string"
           value={data.systemName}
@@ -164,7 +157,7 @@ export default function App(): React.JSX.Element {
           onPress={fetchData}
           activeOpacity={0.8}
         >
-          <RefreshCw size={17} color={COLORS.bg} />
+          <Text style={styles.refreshEmoji}>🔄</Text>
           <Text style={styles.refreshLabel}>Refresh</Text>
         </TouchableOpacity>
       </ScrollView>
@@ -220,6 +213,9 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     marginRight: 14,
   },
+  emoji: {
+    fontSize: 22,
+  },
   cardBody: {
     flex: 1,
   },
@@ -262,6 +258,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 8,
+  },
+  refreshEmoji: {
+    fontSize: 17,
   },
   refreshLabel: {
     color: COLORS.bg,

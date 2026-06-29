@@ -1,97 +1,216 @@
-This is a new [**React Native**](https://reactnative.dev) project, bootstrapped using [`@react-native-community/cli`](https://github.com/react-native-community/cli).
+# TurboModuleExample
 
-# Getting Started
+Projeto de estudo de **Turbo Modules** na **Nova Arquitetura** do React Native.
 
-> **Note**: Make sure you have completed the [Set Up Your Environment](https://reactnative.dev/docs/set-up-your-environment) guide before proceeding.
+A ideia é simples e proposital: implementar, do zero, um módulo nativo de _device info_ (`NativeAppDeviceInfo`) e atravessar **cada camada** que um Turbo Module envolve — da spec em TypeScript ao código nativo em Kotlin (Android) e Swift/Objective-C++ (iOS), passando pelo **Codegen**.
 
-## Step 1: Start Metro
+> 📖 Este repositório é o código que acompanha o artigo:
+> **[Turbo Modules na Nova Arquitetura do React Native — entendendo cada camada na prática](https://medium.com/@murilo.castilho21/turbo-modules-na-nova-arquitetura-do-react-native-entendendo-cada-camada-na-pr%C3%A1tica-aee48b2d2dea)**
 
-First, you will need to run **Metro**, the JavaScript build tool for React Native.
+---
 
-To start the Metro dev server, run the following command from the root of your React Native project:
+## O que o módulo faz
+
+O módulo expõe quatro métodos, escolhidos de propósito para cobrir os **dois modos de chamada** de um Turbo Module — assíncrono (via `Promise`) e síncrono (retorno direto):
+
+| Método               | Assinatura        | Modo       | Fonte nativa                              |
+| -------------------- | ----------------- | ---------- | ----------------------------------------- |
+| `getBatteryLevel()`  | `Promise<number>` | Assíncrono | iOS `UIDevice` · Android `BatteryManager` |
+| `getBatteryState()`  | `Promise<string>` | Assíncrono | iOS `UIDevice` · Android `BatteryManager` |
+| `getSystemVersion()` | `string`          | Síncrono   | iOS `UIDevice` · Android `Build`          |
+| `getSystemName()`    | `string`          | Síncrono   | iOS `UIDevice` · Android (`"Android"`)    |
+
+O app de exemplo (`App.tsx`) renderiza esses valores em cards, separando visualmente os blocos **ASYNC** e **SYNC**, com um botão de _refresh_.
+
+---
+
+## Por que Turbo Module (e não o bridge antigo)
+
+Na arquitetura antiga, módulos nativos eram registrados em runtime e toda comunicação JS ⇄ nativo passava por um **bridge** assíncrono, serializando tudo em JSON. Isso impedia chamadas síncronas e adicionava overhead.
+
+Turbo Modules, na Nova Arquitetura, mudam isso:
+
+- **Lazy loading** — o módulo só é instanciado quando é usado pela primeira vez.
+- **JSI (JavaScript Interface)** — o JS chama o código nativo **diretamente**, sem o bridge JSON. Isso viabiliza métodos **síncronos** (como `getSystemVersion()` aqui).
+- **Type safety via Codegen** — a interface é declarada uma única vez em TypeScript e o **Codegen** gera o "contrato" nativo (C++/Java/ObjC) a partir dela, garantindo que JS e nativo nunca saiam de sincronia.
+
+---
+
+## As camadas, na prática
+
+O fluxo de uma chamada (`NativeDeviceInfo.getBatteryLevel()`) atravessa:
+
+```
+App.tsx (JS/TS)
+   │
+   ▼
+specs/NativeAppDeviceInfo.ts          ← a SPEC (contrato em TypeScript)
+   │
+   ▼  (Codegen lê o codegenConfig do package.json)
+Interfaces nativas geradas
+   ├── Android: NativeAppDeviceInfoSpec (Kotlin/Java)
+   └── iOS:     NativeAppDeviceInfoSpec / ...SpecJSI (C++/ObjC)
+   │
+   ▼
+Implementação nativa
+   ├── Android: NativeAppDeviceInfoModule.kt
+   └── iOS:     RCTNativeAppDeviceInfo.mm  →  NativeAppDeviceInfoImpl.swift
+   │
+   ▼
+Registro
+   ├── Android: NativeAppDeviceInfoPackage.kt + MainApplication.kt
+   └── iOS:     RCT_EXPORT_MODULE + codegenConfig.ios.modulesProvider
+```
+
+### 1. A Spec (TypeScript) — `specs/NativeAppDeviceInfo.ts`
+
+É a **fonte da verdade**. Estende `TurboModule` e é registrada com `TurboModuleRegistry.getEnforcing`. O Codegen usa este arquivo para gerar o contrato nativo.
+
+```ts
+import type { TurboModule } from 'react-native';
+import { TurboModuleRegistry } from 'react-native';
+
+export interface Spec extends TurboModule {
+  getBatteryLevel(): Promise<number>;
+  getBatteryState(): Promise<string>;
+  getSystemVersion(): string;
+  getSystemName(): string;
+}
+
+export default TurboModuleRegistry.getEnforcing<Spec>('NativeAppDeviceInfo');
+```
+
+> Convenção: o arquivo precisa começar com o prefixo `Native` para o Codegen reconhecê-lo como spec de Turbo Module.
+
+### 2. Codegen — `package.json`
+
+O `codegenConfig` diz ao Codegen **onde** estão as specs e **como** nomear/empacotar o código gerado:
+
+```json
+"codegenConfig": {
+  "name": "NativeAppDeviceInfo",
+  "type": "modules",
+  "jsSrcsDir": "specs",
+  "android": { "javaPackageName": "com.nativeappdeviceinfo" },
+  "ios": {
+    "modulesProvider": { "NativeAppDeviceInfo": "RCTNativeAppDeviceInfo" }
+  }
+}
+```
+
+O Codegen roda automaticamente durante o build (Gradle no Android, `pod install` no iOS) e produz as classes de spec que a implementação nativa irá estender.
+
+### 3. Implementação Android (Kotlin)
+
+- **`NativeAppDeviceInfoModule.kt`** — estende `NativeAppDeviceInfoSpec` (gerada pelo Codegen) e implementa os métodos. Métodos assíncronos recebem um `Promise`; síncronos retornam direto.
+- **`NativeAppDeviceInfoPackage.kt`** — um `BaseReactPackage` que registra o módulo e marca `isTurboModule = true` no `ReactModuleInfo`.
+- **`MainApplication.kt`** — adiciona o package à lista: `add(NativeAppDeviceInfoPackage())`.
+
+### 4. Implementação iOS (Swift + Objective-C++)
+
+A lógica de negócio fica em Swift, e a ponte com o React Native fica em ObjC++:
+
+- **`NativeAppDeviceInfoImpl.swift`** — a implementação pura (`@objc public class`), usando `UIDevice`.
+- **`RCTNativeAppDeviceInfo.h/.mm`** — conforma com `NativeAppDeviceInfoSpec`, instancia o `Impl` em Swift, faz `RCT_EXPORT_MODULE` e fornece o `getTurboModule:` retornando o `NativeAppDeviceInfoSpecJSI`.
+- O `modulesProvider` no `codegenConfig` aponta o nome `NativeAppDeviceInfo` para a classe `RCTNativeAppDeviceInfo`.
+
+> ℹ️ Os arquivos `RCTDeviceInfo.h/.mm` são código **legado** de uma iteração anterior (referenciam classes que não existem mais). O par ativo é `RCTNativeAppDeviceInfo`.
+
+---
+
+## Estrutura do projeto
+
+```
+TurboModuleExample/
+├── specs/
+│   └── NativeAppDeviceInfo.ts            # 1. Spec (contrato TS)
+├── App.tsx                               # App de exemplo (ícones lucide)
+├── AppSimple.tsx                         # Variante do app usando emojis
+├── package.json                          # codegenConfig
+│
+├── android/app/src/main/java/
+│   └── com/nativeappdeviceinfo/
+│       ├── NativeAppDeviceInfoModule.kt  # 3. Implementação Kotlin
+│       └── NativeAppDeviceInfoPackage.kt #    Registro do package
+│   └── com/turbomoduleexample/
+│       └── MainApplication.kt            #    add(NativeAppDeviceInfoPackage())
+│
+└── ios/NativeAppDeviceInfo/
+    ├── NativeAppDeviceInfoImpl.swift     # 4. Lógica em Swift
+    ├── RCTNativeAppDeviceInfo.h/.mm      #    Ponte ObjC++ (ativa)
+    └── RCTDeviceInfo.h/.mm               #    (legado)
+```
+
+---
+
+## Stack
+
+- **React Native** 0.85.3 (Nova Arquitetura — `newArchEnabled=true`)
+- **React** 19.2
+- **Android:** Kotlin
+- **iOS:** Swift + Objective-C++
+- **UI:** `lucide-react-native`, `react-native-svg`, `react-native-safe-area-context`
+
+---
+
+## Como rodar
+
+> Antes de tudo, conclua o guia oficial de [Set Up Your Environment](https://reactnative.dev/docs/set-up-your-environment).
+
+### 1. Instalar dependências
 
 ```sh
-# Using npm
+npm install
+```
+
+### 2. Iniciar o Metro
+
+```sh
 npm start
-
-# OR using Yarn
-yarn start
 ```
 
-## Step 2: Build and run your app
+### 3. Build e execução
 
-With Metro running, open a new terminal window/pane from the root of your React Native project, and use one of the following commands to build and run your Android or iOS app:
-
-### Android
+**Android:**
 
 ```sh
-# Using npm
 npm run android
-
-# OR using Yarn
-yarn android
 ```
 
-### iOS
-
-For iOS, remember to install CocoaPods dependencies (this only needs to be run on first clone or after updating native deps).
-
-The first time you create a new project, run the Ruby bundler to install CocoaPods itself:
+**iOS** (na primeira vez, e sempre que mudar deps nativas, instale os Pods — isso também dispara o Codegen):
 
 ```sh
-bundle install
-```
-
-Then, and every time you update your native dependencies, run:
-
-```sh
+bundle install          # apenas na primeira vez
 bundle exec pod install
+npm run ios
 ```
 
-For more information, please visit [CocoaPods Getting Started guide](https://guides.cocoapods.org/using/getting-started.html).
+> 💡 Bateria é melhor testada em **dispositivo físico** — simulador/emulador costuma reportar nível/estado fixos ou indisponíveis.
+
+### Rebuild após mexer na spec
+
+Sempre que alterar `specs/NativeAppDeviceInfo.ts`, é preciso **regenerar o código** e recompilar o app nativo:
+
+- **iOS:** `bundle exec pod install` e rebuild
+- **Android:** rebuild pelo Gradle (`npm run android`)
+
+---
+
+## Testes
 
 ```sh
-# Using npm
-npm run ios
-
-# OR using Yarn
-yarn ios
+npm test
 ```
 
-If everything is set up correctly, you should see your new app running in the Android Emulator, iOS Simulator, or your connected device.
+---
 
-This is one way to run your app — you can also build it directly from Android Studio or Xcode.
+## Referência
 
-## Step 3: Modify your app
+Artigo completo, com o passo a passo e a explicação de cada camada:
 
-Now that you have successfully run the app, let's make changes!
+**[Turbo Modules na Nova Arquitetura do React Native — entendendo cada camada na prática](https://medium.com/@murilo.castilho21/turbo-modules-na-nova-arquitetura-do-react-native-entendendo-cada-camada-na-pr%C3%A1tica-aee48b2d2dea)** — por Murilo Castilho.
 
-Open `App.tsx` in your text editor of choice and make some changes. When you save, your app will automatically update and reflect these changes — this is powered by [Fast Refresh](https://reactnative.dev/docs/fast-refresh).
+Outras referências úteis:
 
-When you want to forcefully reload, for example to reset the state of your app, you can perform a full reload:
-
-- **Android**: Press the <kbd>R</kbd> key twice or select **"Reload"** from the **Dev Menu**, accessed via <kbd>Ctrl</kbd> + <kbd>M</kbd> (Windows/Linux) or <kbd>Cmd ⌘</kbd> + <kbd>M</kbd> (macOS).
-- **iOS**: Press <kbd>R</kbd> in iOS Simulator.
-
-## Congratulations! :tada:
-
-You've successfully run and modified your React Native App. :partying_face:
-
-### Now what?
-
-- If you want to add this new React Native code to an existing application, check out the [Integration guide](https://reactnative.dev/docs/integration-with-existing-apps).
-- If you're curious to learn more about React Native, check out the [docs](https://reactnative.dev/docs/getting-started).
-
-# Troubleshooting
-
-If you're having issues getting the above steps to work, see the [Troubleshooting](https://reactnative.dev/docs/troubleshooting) page.
-
-# Learn More
-
-To learn more about React Native, take a look at the following resources:
-
-- [React Native Website](https://reactnative.dev) - learn more about React Native.
-- [Getting Started](https://reactnative.dev/docs/environment-setup) - an **overview** of React Native and how setup your environment.
-- [Learn the Basics](https://reactnative.dev/docs/getting-started) - a **guided tour** of the React Native **basics**.
-- [Blog](https://reactnative.dev/blog) - read the latest official React Native **Blog** posts.
-- [`@facebook/react-native`](https://github.com/facebook/react-native) - the Open Source; GitHub **repository** for React Native.
+- [Native Modules — The New Architecture (docs oficiais)](https://reactnative.dev/docs/the-new-architecture/pure-cxx-modules)
+- [Codegen](https://reactnative.dev/docs/the-new-architecture/what-is-codegen)
